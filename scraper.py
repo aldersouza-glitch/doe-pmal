@@ -47,13 +47,14 @@ END_SECTION_MARKERS = [
     "PARTICULARES",
 ]
 
-# Cabeçalho de seção: precisa estar praticamente isolado numa linha
-# (sem outros textos grudados antes/depois na mesma linha), pra evitar
-# capturar o índice, referências dentro de despachos, etc.
+# Cabeçalho oficial de seção: linha isolada, SEM pontinhos ou números depois
+# (isso descarta o índice, onde aparece como "...(PMAL) .......... 86")
 PMAL_HEADING_RE = re.compile(
-    r"^[\s.]*Pol[ií]cia Militar do Estado de Alagoas\s*\(PMAL\)[\s.]*$",
+    r"^\s*Pol[ií]cia Militar do Estado de Alagoas\s*\(PMAL\)\s*$",
     re.I | re.M
 )
+# Padrão para detectar linhas de índice (com pontinhos ou número de página)
+INDEX_LINE_RE = re.compile(r"\.{3,}|\.\s*\d+\s*$")
 
 MESES = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4,
@@ -149,12 +150,21 @@ def extract_pmal_materias(pages: list) -> list:
         page_offsets.append((num, len(full_text)))
         full_text += txt + "\n"
 
-    matches = list(PMAL_HEADING_RE.finditer(full_text))
-    if not matches:
+    # Filtra ocorrências dentro do índice (linhas com "......" ou terminando em número)
+    candidates = []
+    for m in PMAL_HEADING_RE.finditer(full_text):
+        line_start = full_text.rfind("\n", 0, m.start()) + 1
+        line_end = full_text.find("\n", m.end())
+        if line_end == -1:
+            line_end = len(full_text)
+        line = full_text[line_start:line_end]
+        if INDEX_LINE_RE.search(line):
+            continue  # linha de índice, ignora
+        candidates.append(m)
+    if not candidates:
         return []
-    # Se houver mais de uma ocorrência (raro, mas possível),
-    # usa a que estiver mais próxima do fim do diário.
-    start = matches[-1].end()
+    # Usa a última ocorrência válida (a seção real é sempre a última no diário).
+    start = candidates[-1].end()
     end = len(full_text)
     for marker in END_SECTION_MARKERS:
         pattern = re.compile(r"^\s*" + re.escape(marker) + r"\s*$", re.M)
