@@ -150,16 +150,22 @@ def extract_pmal_materias(pages: list) -> list:
         page_offsets.append((num, len(full_text)))
         full_text += txt + "\n"
 
-    # Filtra ocorrências dentro do índice (linhas com "......" ou terminando em número)
+    def pos_to_page(abs_pos: int) -> int:
+        pagina = page_offsets[0][0]
+        for p, off in page_offsets:
+            if abs_pos >= off:
+                pagina = p
+            else:
+                break
+        return pagina
+
+    # Filtra ocorrências do índice usando a PÁGINA: o índice fica nas
+    # primeiras ~5 páginas; a seção real da PMAL fica muito depois (pág 70+).
     candidates = []
     for m in PMAL_HEADING_RE.finditer(full_text):
-        line_start = full_text.rfind("\n", 0, m.start()) + 1
-        line_end = full_text.find("\n", m.end())
-        if line_end == -1:
-            line_end = len(full_text)
-        line = full_text[line_start:line_end]
-        if INDEX_LINE_RE.search(line):
-            continue  # linha de índice, ignora
+        page = pos_to_page(m.start())
+        if page <= 10:
+            continue  # está no índice ou no expediente, ignora
         candidates.append(m)
     if not candidates:
         return []
@@ -173,15 +179,6 @@ def extract_pmal_materias(pages: list) -> list:
             end = m.start()
 
     section = full_text[start:end]
-
-    def pos_to_page(abs_pos: int) -> int:
-        pagina = page_offsets[0][0]
-        for p, off in page_offsets:
-            if abs_pos >= off:
-                pagina = p
-            else:
-                break
-        return pagina
 
     materias_ends = []
     for m in re.finditer(r"Protocolo\s+\d+", section):
