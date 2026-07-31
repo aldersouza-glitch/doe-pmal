@@ -222,3 +222,54 @@ def try_download(edition_id: int, dest: Path) -> bool:
     dest.write_bytes(r.content)
     print(f"  id {edition_id}: PDF baixado ({len(r.content)//1024} KB)")
     return True
+    CSS = """
+:root{
+  --tinta:#10151c; --papel:#f7f5f0; --carta:#ffffff;
+  --farda:#1e3a5f; --farda-escuro:#14283f; --dourado:#b8860b;
+  --cinza:#5c6672; --linha:#e3ded4;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--papel);color:var(--tinta);
+  font:16px/1.6 Georgia,'Times New Roman',serif}
+header.site{background:var(--farda-escuro);color:#fff;padding:28px 20px;
+  border-bottom:4px solid var(--dourado)}
+header.site .wrap,main{max-width:900px;margin:0 auto;padding:0 4px}
+header.site h1{margin:0;font-size:1.5rem;letter-spacing:.5px;
+  font-family:'Trebuchet MS',Verdana,sans-serif;text-transform:uppercase}
+header.site p{margin:6px 0 0;opacity:.85;font-size:.9rem}
+main{padding:28px 20px 60px}
+.card{background:var(--carta);border:1px solid var(--linha);
+  border-left:5px solid var(--farda);border-radius:6px;
+  padding:18px 22px;margin:0 0 16px}
+.card h2{margin:0 0 4px;font-size:1.1rem;color:var(--farda)}
+.card .meta{color:var(--cinza);font-size:.85rem;
+  font-family:'Trebuchet MS',Verdana,sans-serif}
+.badge{display:inline-block;background:var(--farda);color:#fff;
+  border-radius:20px;padding:2px 12px;font-size:.78rem;
+  font-family:'Trebuchet MS',Verdana,sans-serif;margin-left:8px}
+a.card-link{text-decoration:none;color:inherit;display:block}
+a.card-link:hover .card{border-left-color:var(--dourado)}
+details{background:var(--carta);border:1px solid var(--linha);
+  border-radius:6px;margin:0 0 12px;padding:0}
+details summary{cursor:pointer;padding:14px 18px;font-weight:bold;
+  color:var(--farda);list-style-position:inside}
+details[open] summary{border-bottom:1px solid var(--linha)}
+details .corpo{padding:14px 18px;white-space:pre-wrap;font-size:.93rem}
+.busca{width:100%;padding:12px 16px;font:inherit;border:1px solid var(--linha);
+  border-radius:6px;margin:0 0 18px;background:var(--carta)}
+h3.secao{font-family:'Trebuchet MS',Verdana,sans-serif;color:var(--farda);
+  text-transform:uppercase;font-size:.9rem;letter-spacing:1.5px;
+  border-bottom:2px solid var(--dourado);padding-bottom:6px;margin:34px 0 16px}
+.aviso{background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;
+  padding:12px 16px;font-size:.88rem;color:#6b5900;margin:0 0 18px}
+.pag{background:var(--dourado);color:#fff;border-radius:4px;
+  padding:1px 8px;font-size:.75rem;
+  font-family:'Trebuchet MS',Verdana,sans-serif;margin-left:6px}
+.voltar{font-family:'Trebuchet MS',Verdana,sans-serif;font-size:.85rem}
+.voltar a{color:var(--farda)}
+footer{max-width:900px;margin:0 auto;padding:20px;color:var(--cinza);
+  font-size:.8rem;border-top:1px solid var(--linha)}
+"""
+
+
+def html_page(title: str, body: str,
