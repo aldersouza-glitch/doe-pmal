@@ -70,15 +70,30 @@ NEXT_SECTIONS_RE = re.compile(
 
 # Termos que identificam matéria da PMAL em outras seções
 PMAL_TERMS_RE = re.compile(
-    r"\bPMAL\b|\bPM/AL\b|\bPM\-AL\b"
+    r"\bPMAL\b|\bPM/AL\b|\bPM\-AL\b|\bPM\s+AL\b"
     r"|Pol[ií]cia\s+Militar\s+d[eo]\s+(?:Estado|Alagoas)"
-    r"|\bCel\.?\s*PM\b|\bTen\.?\s*Cel\.?\s*PM\b|\bMaj\.?\s*PM\b"
-    r"|\bCap\.?\s*PM\b|\b1[°ºo]\s*Ten\.?\s*PM\b|\b2[°ºo]\s*Ten\.?\s*PM\b"
-    r"|\bAsp\.?\s*PM\b|\bSubten\.?\s*PM\b"
-    r"|\b1[°ºo]\s*Sgt\.?\s*PM\b|\b2[°ºo]\s*Sgt\.?\s*PM\b|\b3[°ºo]\s*Sgt\.?\s*PM\b"
-    r"|\bSgt\.?\s*PM\b|\bCb\.?\s*PM\b|\bSd\.?\s*PM\b"
+    r"|Policia\s+Militar\s+do\s+Estado"
     r"|Comando\s*Geral\s*da\s*PM"
-    r"|Policia\s+Militar\s+do\s+Estado",
+    # Abreviações com PM
+    r"|\bCel\.?\s*PM\b|\bTen\.?\s*Cel\.?\s*PM\b|\bMaj\.?\s*PM\b"
+    r"|\bCap\.?\s*PM\b|\bTen\.?\s*PM\b|\bAsp\.?\s*PM\b"
+    r"|\bSubten\.?\s*PM\b|\bSgt\.?\s*PM\b|\bCb\.?\s*PM\b|\bSd\.?\s*PM\b"
+    # Abreviações com QP/QO PM
+    r"|\bQP\s*PM\b|\bQO\s*PM\b"
+    # Patentes por extenso (captura o contexto PM AL no bloco)
+    r"|PRIMEIRO\s+SARGENTO|SEGUNDO\s+SARGENTO|TERCEIRO\s+SARGENTO"
+    r"|SUB\s*TENENTE|SUBTENENTE|PRIMEIRO\s+TENENTE|SEGUNDO\s+TENENTE"
+    r"|CAPIT[AÃ]O|MAJOR|TENENTE\s+CORONEL|CORONEL"
+    r"|CABO\s+PM|SOLDADO\s+PM"
+    # Diárias militar (DETRAN, SSP, etc.)
+    r"|DI[AÁ]RIAS\s*[-–]?\s*MILITAR",
+    re.I
+)
+
+# Termos que indicam Corpo de Bombeiros (pra EXCLUIR)
+BM_EXCLUDE_RE = re.compile(
+    r"\bCBM\b|\bCBMAL\b|\bCBM/AL\b|Bombeiro|\bBM\b"
+    r"|Corpo\s+de\s+Bombeiros",
     re.I
 )
 
@@ -231,9 +246,25 @@ def extract_all_pmal(pdf_path):
         # Se NÃO está na seção PMAL e NÃO está no índice (pags 1-5),
         # verifica se menciona a PMAL
         elif pagina_ini > 5 and pagina_ini not in pmal_range:
-            if PMAL_TERMS_RE.search(body):
-                materias_mencoes.append(
-                    make_materia(body, pagina_ini, pagina_fim, "Menção"))
+            if PMAL_TERMS_RE.search(body) and not BM_EXCLUDE_RE.search(body):
+                # Patentes por extenso só contam se o bloco também tiver "PM AL" ou "PM" no contexto
+                rank_only = re.search(
+                    r"PRIMEIRO SARGENTO|SEGUNDO SARGENTO|TERCEIRO SARGENTO"
+                    r"|SUB.?TENENTE|CAPIT.O|MAJOR|TENENTE CORONEL|CORONEL"
+                    r"|DI.RIAS.*MILITAR", body, re.I)
+                pm_context = re.search(r"\bPM\s*AL\b|\bPMAL\b|\bPM/AL\b|\d+\s*PM\s*AL", body, re.I)
+                # Se achou só patente por extenso, exige que também tenha "PM AL" no bloco
+                if rank_only and not pm_context:
+                    has_pm_abbrev = re.search(
+                        r"\bPM\b(?!\s*(?:AL|/|-))", body)
+                    if not has_pm_abbrev:
+                        pass  # Ignora: patente genérica sem vínculo com PM
+                    else:
+                        materias_mencoes.append(
+                            make_materia(body, pagina_ini, pagina_fim, "Menção"))
+                else:
+                    materias_mencoes.append(
+                        make_materia(body, pagina_ini, pagina_fim, "Menção"))
 
     print(f"  Matérias na seção PMAL: {len(materias_pmal)}")
     print(f"  Menções à PMAL em outras seções: {len(materias_mencoes)}")
@@ -436,15 +467,16 @@ def gerar_pdf(ed, dest):
                               textColor=colors.HexColor("#1e3a5f"),
                               spaceBefore=14, spaceAfter=6)
     st_mat = ParagraphStyle("mat", parent=styles["Normal"],
-                            fontName="Helvetica-Bold", fontSize=9.5,
+                            fontName="Helvetica-Bold", fontSize=12,
                             textColor=colors.HexColor("#14283f"),
-                            spaceBefore=10, spaceAfter=3)
+                            spaceBefore=12, spaceAfter=4)
     st_pag = ParagraphStyle("pag", parent=styles["Normal"],
-                            fontName="Helvetica-Oblique", fontSize=8,
-                            textColor=colors.HexColor("#b8860b"), spaceAfter=4)
+                            fontName="Helvetica-Oblique", fontSize=10,
+                            textColor=colors.HexColor("#b8860b"), spaceAfter=6)
     st_corpo = ParagraphStyle("corpo", parent=styles["Normal"],
-                              fontName="Helvetica", fontSize=8.5,
-                              leading=11.5, spaceAfter=6)
+                              fontName="Helvetica", fontSize=12,
+                              leading=16, spaceAfter=8,
+                              alignment=4)  # 4 = TA_JUSTIFY
 
     doc = SimpleDocTemplate(str(dest), pagesize=A4,
                             leftMargin=1.8*cm, rightMargin=1.8*cm,
