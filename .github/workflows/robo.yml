@@ -2,12 +2,10 @@ name: Robô DOE-AL PMAL
 
 on:
   schedule:
-    # Horários em UTC. Maceió = UTC-3.
-    # Roda às 09h, 12h e 16h (horário de Maceió), de segunda a sexta.
     - cron: "0 12 * * 1-5"
     - cron: "0 15 * * 1-5"
     - cron: "0 19 * * 1-5"
-  workflow_dispatch: {}   # permite rodar manualmente pelo botão "Run workflow"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -75,5 +73,13 @@ jobs:
           git config user.name "robo-doe-pmal"
           git config user.email "actions@github.com"
           git add -A
-          git diff --cached --quiet && echo "Sem novidades." || git commit -m "Compilação automática $(date -u +'%Y-%m-%d %H:%M')"
-          git push
+          if git diff --cached --quiet; then
+            echo "Sem novidades."
+          else
+            git commit -m "Compilação automática $(date -u +'%Y-%m-%d %H:%M')"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              echo "Tentativa $i falhou, aguardando..."
+              sleep 5
+            done
+          fi
