@@ -2,14 +2,12 @@
 """
 Robô DOE-AL → PMAL
 Baixa novas edições do Diário Oficial do Estado de Alagoas,
-extrai APENAS a seção da Polícia Militar de Alagoas (PMAL)
-usando os números de página do índice do próprio diário.
+extrai a seção da Polícia Militar de Alagoas (PMAL) e matérias
+de outras seções que mencionem a PMAL, com indicação de página.
 """
 
 import json
-import os
 import re
-import sys
 import unicodedata
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -58,16 +56,30 @@ FIXES = {
     "identiicaç": "identificaç", "ica ": "fica ", " im ": " fim ",
 }
 
-# Regex para encontrar a linha da PMAL no índice: "Polícia Militar...(PMAL)...86"
+# Regex pra encontrar a PMAL no índice do diário
 INDEX_PMAL_RE = re.compile(
     r"Pol[ií]cia\s+Militar.*?\(PMAL\).*?(\d+)\s*$", re.I | re.M
 )
 
-# Seções que podem vir DEPOIS da PMAL no índice (para saber a página final)
+# Seções que vêm DEPOIS da PMAL no índice
 NEXT_SECTIONS_RE = re.compile(
     r"(?:ADMINISTRA[CÇ][AÃ]O\s+INDIRETA|Eventos\s+Funcionais|"
     r"Prefeituras\s+do\s+Interior|PARTICULARES).*?(\d+)\s*$",
     re.I | re.M
+)
+
+# Termos que identificam matéria da PMAL em outras seções
+PMAL_TERMS_RE = re.compile(
+    r"\bPMAL\b|\bPM/AL\b|\bPM\-AL\b"
+    r"|Pol[ií]cia\s+Militar\s+d[eo]\s+(?:Estado|Alagoas)"
+    r"|\bCel\.?\s*PM\b|\bTen\.?\s*Cel\.?\s*PM\b|\bMaj\.?\s*PM\b"
+    r"|\bCap\.?\s*PM\b|\b1[°ºo]\s*Ten\.?\s*PM\b|\b2[°ºo]\s*Ten\.?\s*PM\b"
+    r"|\bAsp\.?\s*PM\b|\bSubten\.?\s*PM\b"
+    r"|\b1[°ºo]\s*Sgt\.?\s*PM\b|\b2[°ºo]\s*Sgt\.?\s*PM\b|\b3[°ºo]\s*Sgt\.?\s*PM\b"
+    r"|\bSgt\.?\s*PM\b|\bCb\.?\s*PM\b|\bSd\.?\s*PM\b"
+    r"|Comando\s*Geral\s*da\s*PM"
+    r"|Policia\s+Militar\s+do\s+Estado",
+    re.I
 )
 
 
@@ -89,7 +101,6 @@ def strip_headers(text):
 
 
 def extract_page_text(page):
-    """Extrai texto de uma página respeitando duas colunas."""
     w, h = page.width, page.height
     mid = w / 2
     try:
@@ -120,96 +131,114 @@ def parse_metadata(text):
     return meta
 
 
-def find_pmal_page_range(pdf_path):
-    """Lê o índice (primeiras 5 páginas) e retorna (pag_inicio, pag_fim) da PMAL."""
-    index_text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages[:5]:
-            index_text += extract_page_text(page) + "\n"
-
-    # Procura a PMAL no índice
+def find_pmal_page_range(index_text):
     m = INDEX_PMAL_RE.search(index_text)
     if not m:
         return None, None
     pag_inicio = int(m.group(1))
-
-    # Procura as seções que vêm depois da PMAL
     pag_fim = None
     for m2 in NEXT_SECTIONS_RE.finditer(index_text):
         p = int(m2.group(1))
         if p > pag_inicio:
-            if pag_fim is None or p < pag_fim:
-                pag_fim = p
+            pag_fim = p
             break
-
-    # Se não achou o fim, usa início + 15 páginas como limite
     if pag_fim is None:
         pag_fim = pag_inicio + 15
-
     return pag_inicio, pag_fim
 
 
-def extract_pmal_materias(pdf_path):
-    """Extrai matérias APENAS das páginas da seção PMAL."""
-    pag_inicio, pag_fim = find_pmal_page_range(pdf_path)
-    if pag_inicio is None:
-        print("  AVISO: Seção PMAL não encontrada no índice.")
-        return []
+def make_materia(body, pagina_ini, pagina_fim, origem="PMAL"):
+    lines = [l.strip() for l in body.split("\n") if l.strip()]
+    titulo = lines[0] if lines else "Matéria"
+    if len(titulo) > 120:
+        titulo = titulo[:117] + "..."
+    proto = None
+    pm = re.search(r"Protocolo\s+(\d+)", body)
+    if pm:
+        proto = pm.group(1)
+    return {
+        "titulo": titulo,
+        "protocolo": proto,
+        "texto": body,
+        "pagina_ini": pagina_ini,
+        "pagina_fim": pagina_fim,
+        "origem": origem,
+    }
 
-    print(f"  Seção PMAL: páginas {pag_inicio} a {pag_fim - 1}")
 
-    # Extrai texto apenas das páginas da PMAL
+def extract_all_pmal(pdf_path):
+    """Extrai:
+    1) Todas as matérias da seção oficial da PMAL (pelo índice)
+    2) Matérias de OUTRAS seções que mencionem a PMAL
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        total_pages = len(pdf.pages)
+
+        # --- Ler índice (primeiras 5 páginas) ---
+        index_text = ""
+        for p in pdf.pages[:5]:
+            index_text += extract_page_text(p) + "\n"
+
+        pag_inicio, pag_fim = find_pmal_page_range(index_text)
+        pmal_range = set()
+        if pag_inicio:
+            pmal_range = set(range(pag_inicio, pag_fim))
+            print(f"  Seção PMAL no índice: páginas {pag_inicio} a {pag_fim - 1}")
+        else:
+            print("  AVISO: Seção PMAL não encontrada no índice.")
+
+        # --- Extrair texto de TODAS as páginas ---
+        all_pages = []  # [(num_pagina, texto)]
+        for i, page in enumerate(pdf.pages, 1):
+            all_pages.append((i, extract_page_text(page)))
+
+    # --- Montar texto completo com rastreio de posição por página ---
     full_text = ""
     page_offsets = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num in range(pag_inicio, min(pag_fim, len(pdf.pages) + 1)):
-            if page_num < 1 or page_num > len(pdf.pages):
-                continue
-            page = pdf.pages[page_num - 1]  # pages é 0-indexed
-            txt = extract_page_text(page)
-            page_offsets.append((page_num, len(full_text)))
-            full_text += txt + "\n"
+    for num, txt in all_pages:
+        page_offsets.append((num, len(full_text)))
+        full_text += txt + "\n"
 
-    if not full_text.strip():
-        return []
-
-    def pos_to_page(abs_pos):
-        pagina = page_offsets[0][0] if page_offsets else pag_inicio
+    def pos_to_page(pos):
+        pagina = page_offsets[0][0]
         for p, off in page_offsets:
-            if abs_pos >= off:
+            if pos >= off:
                 pagina = p
             else:
                 break
         return pagina
 
-    # Divide em matérias pelo delimitador "Protocolo N"
-    materias = []
-    chunks = list(re.finditer(r"Protocolo\s+\d+", full_text))
-    cursor = 0
-    for m in chunks:
-        proto_end = m.end()
-        body = full_text[cursor:proto_end].strip()
-        if len(body) > 30:
-            pagina_ini = pos_to_page(cursor)
-            pagina_fim = pos_to_page(proto_end - 1)
-            lines = [l.strip() for l in body.split("\n") if l.strip()]
-            titulo = lines[0] if lines else "Matéria"
-            if len(titulo) > 120:
-                titulo = titulo[:117] + "..."
-            proto = None
-            pm = re.search(r"Protocolo\s+(\d+)", body)
-            if pm:
-                proto = pm.group(1)
-            materias.append({
-                "titulo": titulo,
-                "protocolo": proto,
-                "texto": body,
-                "pagina_ini": pagina_ini,
-                "pagina_fim": pagina_fim,
-            })
-        cursor = proto_end
+    # --- Dividir TODO o diário em blocos por "Protocolo N" ---
+    proto_positions = [m.end() for m in re.finditer(r"Protocolo\s+\d+", full_text)]
 
-    return materias
+    materias_pmal = []
+    materias_mencoes = []
+    cursor = 0
+
+    for proto_end in proto_positions:
+        body = full_text[cursor:proto_end].strip()
+        cursor = proto_end
+        if len(body) < 30:
+            continue
+
+        pagina_ini = pos_to_page(proto_end - len(body))
+        pagina_fim = pos_to_page(proto_end - 1)
+
+        # Verificar se está na faixa de páginas da seção PMAL
+        if pmal_range and pagina_ini in pmal_range:
+            materias_pmal.append(make_materia(body, pagina_ini, pagina_fim, "PMAL"))
+
+        # Se NÃO está na seção PMAL e NÃO está no índice (pags 1-5),
+        # verifica se menciona a PMAL
+        elif pagina_ini > 5 and pagina_ini not in pmal_range:
+            if PMAL_TERMS_RE.search(body):
+                materias_mencoes.append(
+                    make_materia(body, pagina_ini, pagina_fim, "Menção"))
+
+    print(f"  Matérias na seção PMAL: {len(materias_pmal)}")
+    print(f"  Menções à PMAL em outras seções: {len(materias_mencoes)}")
+
+    return materias_pmal, materias_mencoes
 
 
 def try_download(edition_id, dest):
@@ -258,6 +287,9 @@ main{padding:28px 20px 60px}
 .badge{display:inline-block;background:var(--farda);color:#fff;
   border-radius:20px;padding:2px 12px;font-size:.78rem;
   font-family:'Trebuchet MS',Verdana,sans-serif;margin-left:8px}
+.badge-m{display:inline-block;background:var(--dourado);color:#fff;
+  border-radius:20px;padding:2px 12px;font-size:.78rem;
+  font-family:'Trebuchet MS',Verdana,sans-serif;margin-left:8px}
 a.card-link{text-decoration:none;color:inherit;display:block}
 a.card-link:hover .card{border-left-color:var(--dourado)}
 details{background:var(--carta);border:1px solid var(--linha);
@@ -266,6 +298,7 @@ details summary{cursor:pointer;padding:14px 18px;font-weight:bold;
   color:var(--farda);list-style-position:inside}
 details[open] summary{border-bottom:1px solid var(--linha)}
 details .corpo{padding:14px 18px;white-space:pre-wrap;font-size:.93rem}
+details.mencao{border-left:4px solid var(--dourado)}
 .busca{width:100%;padding:12px 16px;font:inherit;border:1px solid var(--linha);
   border-radius:6px;margin:0 0 18px;background:var(--carta)}
 h3.secao{font-family:'Trebuchet MS',Verdana,sans-serif;color:var(--farda);
@@ -322,23 +355,36 @@ def build_edition_page(ed):
         f'<a href="{ed["numero"]}.pdf">Baixar compilado PMAL (PDF)</a> &nbsp;&middot;&nbsp; '
         f'<a href="{API_PDF.format(ed["id"])}" target="_blank">Edição completa (PDF oficial)</a></p>',
         f'<h2>Edição nº {ed["numero"]} — {ed["data_texto"]}'
-        f'<span class="badge">{len(ed["materias"])} matéria(s) PMAL</span></h2>',
+        f'<span class="badge">{ed.get("qtd_secao", 0)} na seção</span>'
+        f'<span class="badge-m">{ed.get("qtd_mencoes", 0)} menções</span></h2>',
     ]
-    if not ed["materias"]:
+    if not ed["materias"] and not ed["mencoes"]:
         body.append('<div class="aviso">Nenhuma matéria da PMAL foi localizada nesta edição.</div>')
     else:
         body.append('<input class="busca" id="busca" type="search" '
                     'placeholder="Filtrar por nome, posto, matrícula...">')
-        body.append('<h3 class="secao">Seção Polícia Militar do Estado de Alagoas (PMAL)</h3>')
+
+    if ed["materias"]:
+        body.append('<h3 class="secao">Seção Oficial da PMAL</h3>')
         for mat in ed["materias"]:
             proto = f' &middot; Protocolo {mat["protocolo"]}' if mat["protocolo"] else ""
             body.append(
                 f'<details class="mat"><summary>{esc(mat["titulo"])}'
                 f'<span class="pag">{pag_label(mat)}</span>'
                 f'<span class="meta">{proto}</span></summary>'
-                f'<div class="corpo">{esc(mat["texto"])}</div></details>'
-            )
-        body.append("""<script>
+                f'<div class="corpo">{esc(mat["texto"])}</div></details>')
+
+    if ed["mencoes"]:
+        body.append('<h3 class="secao">Menções à PMAL em outras seções</h3>')
+        for mat in ed["mencoes"]:
+            proto = f' &middot; Protocolo {mat["protocolo"]}' if mat["protocolo"] else ""
+            body.append(
+                f'<details class="mat mencao"><summary>{esc(mat["titulo"])}'
+                f'<span class="pag">{pag_label(mat)}</span>'
+                f'<span class="meta">{proto}</span></summary>'
+                f'<div class="corpo">{esc(mat["texto"])}</div></details>')
+
+    body.append("""<script>
 const campo=document.getElementById('busca');
 if(campo){campo.addEventListener('input',()=>{
   const q=campo.value.toLowerCase();
@@ -358,13 +404,13 @@ def build_index(editions):
     else:
         body.append('<h3 class="secao">Edições compiladas</h3>')
         for ed in sorted(editions, key=lambda e: (e.get("data") or "", e["numero"]), reverse=True):
-            n_mat = ed.get("qtd_materias", 0)
             body.append(
                 f'<a class="card-link" href="edicoes/{ed["numero"]}.html"><div class="card">'
                 f'<h2>Edição nº {ed["numero"]}</h2>'
-                f'<div class="meta">{ed["data_texto"]} &middot; {n_mat} matéria(s) na seção PMAL</div>'
-                f'</div></a>'
-            )
+                f'<div class="meta">{ed["data_texto"]} &middot; '
+                f'{ed.get("qtd_secao", 0)} na seção PMAL &middot; '
+                f'{ed.get("qtd_mencoes", 0)} menções em outras seções</div>'
+                f'</div></a>')
     return html_page("DOE-AL — Clipping PMAL", "\n".join(body))
 
 
@@ -389,10 +435,10 @@ def gerar_pdf(ed, dest):
                               fontName="Helvetica-Bold", fontSize=11,
                               textColor=colors.HexColor("#1e3a5f"),
                               spaceBefore=14, spaceAfter=6)
-    st_mat_titulo = ParagraphStyle("mat", parent=styles["Normal"],
-                                   fontName="Helvetica-Bold", fontSize=9.5,
-                                   textColor=colors.HexColor("#14283f"),
-                                   spaceBefore=10, spaceAfter=3)
+    st_mat = ParagraphStyle("mat", parent=styles["Normal"],
+                            fontName="Helvetica-Bold", fontSize=9.5,
+                            textColor=colors.HexColor("#14283f"),
+                            spaceBefore=10, spaceAfter=3)
     st_pag = ParagraphStyle("pag", parent=styles["Normal"],
                             fontName="Helvetica-Oblique", fontSize=8,
                             textColor=colors.HexColor("#b8860b"), spaceAfter=4)
@@ -407,18 +453,30 @@ def gerar_pdf(ed, dest):
     story = [
         Paragraph("DOE-AL - Clipping PMAL", st_titulo),
         Paragraph(f"Edição nº {ed['numero']} — {ed['data_texto']} - "
-                  f"{len(ed['materias'])} matéria(s) na seção PMAL", st_sub),
+                  f"{ed.get('qtd_secao', 0)} na seção PMAL, "
+                  f"{ed.get('qtd_mencoes', 0)} menções em outras seções", st_sub),
         HRFlowable(width="100%", thickness=1.2, color=colors.HexColor("#b8860b")),
     ]
+
     if ed["materias"]:
-        story.append(Paragraph("SEÇÃO POLÍCIA MILITAR DO ESTADO DE ALAGOAS (PMAL)", st_secao))
+        story.append(Paragraph("SEÇÃO OFICIAL DA PMAL", st_secao))
         for i, mat in enumerate(ed["materias"], 1):
             proto = f" - Protocolo {mat['protocolo']}" if mat["protocolo"] else ""
-            story.append(Paragraph(f"{i}. {p(mat['titulo'])}{proto}", st_mat_titulo))
+            story.append(Paragraph(f"{i}. {p(mat['titulo'])}{proto}", st_mat))
             story.append(Paragraph(f"({pag_label(mat)} do diário oficial)", st_pag))
             story.append(Paragraph(p(mat["texto"]), st_corpo))
-    else:
-        story.append(Paragraph("Nenhuma matéria localizada na seção da PMAL nesta edição.", st_corpo))
+
+    if ed["mencoes"]:
+        story.append(Paragraph("MENÇÕES À PMAL EM OUTRAS SEÇÕES", st_secao))
+        for i, mat in enumerate(ed["mencoes"], 1):
+            proto = f" - Protocolo {mat['protocolo']}" if mat["protocolo"] else ""
+            story.append(Paragraph(f"{i}. {p(mat['titulo'])}{proto}", st_mat))
+            story.append(Paragraph(f"({pag_label(mat)} do diário oficial)", st_pag))
+            story.append(Paragraph(p(mat["texto"]), st_corpo))
+
+    if not ed["materias"] and not ed["mencoes"]:
+        story.append(Paragraph("Nenhuma matéria da PMAL nesta edição.", st_corpo))
+
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#e3ded4")))
     story.append(Paragraph(
@@ -441,13 +499,16 @@ def load_editions():
 
 def process_pdf(edition_id, pdf_path):
     meta = parse_metadata(first_page_text(pdf_path))
-    materias = extract_pmal_materias(pdf_path)
+    materias_pmal, materias_mencoes = extract_all_pmal(pdf_path)
     return {
         "id": edition_id,
         "numero": meta["numero"] or str(edition_id),
         "data": meta["data"],
         "data_texto": meta["data_texto"] or "data não identificada",
-        "materias": materias,
+        "materias": materias_pmal,
+        "mencoes": materias_mencoes,
+        "qtd_secao": len(materias_pmal),
+        "qtd_mencoes": len(materias_mencoes),
         "processado_em": datetime.now(TZ_MACEIO).isoformat(),
     }
 
@@ -474,8 +535,9 @@ def main():
         finally:
             tmp.unlink(missing_ok=True)
 
+        total = ed["qtd_secao"] + ed["qtd_mencoes"]
         print(f"  -> Edição nº {ed['numero']} ({ed['data_texto']}): "
-              f"{len(ed['materias'])} matérias PMAL")
+              f"{ed['qtd_secao']} na seção + {ed['qtd_mencoes']} menções = {total} total")
 
         (EDICOES_DIR / f'{ed["numero"]}.html').write_text(
             build_edition_page(ed), encoding="utf-8")
@@ -485,10 +547,11 @@ def main():
             f.write(f"docs/edicoes/{ed['numero']}.pdf\n")
         with open(BASE / "resumo.txt", "a", encoding="utf-8") as f:
             f.write(f"Edição nº {ed['numero']} — {ed['data_texto']}: "
-                    f"{len(ed['materias'])} matéria(s) na seção PMAL.\n")
+                    f"{ed['qtd_secao']} na seção PMAL + "
+                    f"{ed['qtd_mencoes']} menções.\n")
 
-        summary = {k: ed[k] for k in ("id", "numero", "data", "data_texto")}
-        summary["qtd_materias"] = len(ed["materias"])
+        summary = {k: ed[k] for k in ("id", "numero", "data", "data_texto",
+                                       "qtd_secao", "qtd_mencoes")}
         editions_index = [e for e in editions_index if e["numero"] != ed["numero"]]
         editions_index.append(summary)
         processed_ids.add(candidate)
