@@ -183,15 +183,15 @@ def make_materia(body, pagina_ini, pagina_fim, origem="PMAL"):
 
 def extract_all_pmal(pdf_path):
     """Extrai:
-    1) Todas as matérias da seção oficial da PMAL (pelo índice)
-    2) Matérias de OUTRAS seções que mencionem a PMAL
+    1) Matérias da seção oficial da PMAL (pelo índice, com recorte preciso)
+    2) Matérias de outras seções que mencionem a PMAL
     """
     with pdfplumber.open(pdf_path) as pdf:
         total_pages = len(pdf.pages)
 
-        # --- Ler índice (primeiras 5 páginas) ---
+        # --- Ler índice (primeiras 6 páginas) ---
         index_text = ""
-        for p in pdf.pages[:5]:
+        for p in pdf.pages[:6]:
             index_text += extract_page_text(p) + "\n"
 
         pag_inicio, pag_fim = find_pmal_page_range(index_text)
@@ -203,11 +203,28 @@ def extract_all_pmal(pdf_path):
             print("  AVISO: Seção PMAL não encontrada no índice.")
 
         # --- Extrair texto de TODAS as páginas ---
-        all_pages = []  # [(num_pagina, texto)]
+        all_pages = []
         for i, page in enumerate(pdf.pages, 1):
             all_pages.append((i, extract_page_text(page)))
 
-    # --- Montar texto completo com rastreio de posição por página ---
+    # --- Montar texto das páginas da PMAL (com recorte preciso) ---
+    pmal_text = ""
+    if pmal_range:
+        raw_pmal = ""
+        for num, txt in all_pages:
+            if num in pmal_range:
+                raw_pmal += txt + "\n"
+        # Encontrar o cabeçalho real da PMAL dentro dessas páginas
+        heading_re = re.compile(
+            r"Pol[ií]cia\s+Militar\s+do\s+Estado\s+de\s+Alagoas\s*\(PMAL\)",
+            re.I)
+        hm = heading_re.search(raw_pmal)
+        if hm:
+            pmal_text = raw_pmal[hm.end():]
+        else:
+            pmal_text = raw_pmal
+
+    # --- Montar texto completo para busca de menções ---
     full_text = ""
     page_offsets = []
     for num, txt in all_pages:
@@ -215,7 +232,7 @@ def extract_all_pmal(pdf_path):
         full_text += txt + "\n"
 
     def pos_to_page(pos):
-        pagina = page_offsets[0][0]
+        pagina = page_offsets[0][0] if page_offsets else 1
         for p, off in page_offsets:
             if pos >= off:
                 pagina = p
@@ -223,48 +240,67 @@ def extract_all_pmal(pdf_path):
                 break
         return pagina
 
-    # --- Dividir TODO o diário em blocos por "Protocolo N" ---
-    proto_positions = [m.end() for m in re.finditer(r"Protocolo\s+\d+", full_text)]
-
+    # --- Extrair matérias da seção PMAL ---
     materias_pmal = []
-    materias_mencoes = []
-    cursor = 0
+    if pmal_text.strip():
+        chunks = list(re.finditer(r"Protocolo\s+\d+", pmal_text))
+        cursor = 0
+        for m in chunks:
+            body = pmal_text[cursor:m.end()].strip()
+            cursor = m.end()
+            if len(body) < 30:
+                continue
+            # Calcular página aproximada
+            # Procura este bloco no full_text pra achar a posição real
+            snippet = body[:80]
+            pos_in_full = full_text.find(snippet)
+            if pos_in_full >= 0:
+                pi = pos_to_page(pos_in_full)
+                pf = pos_to_page(pos_in_full + len(body) - 1)
+            else:
+                pi = pag_inicio
+                pf = pag_inicio
+            materias_pmal.append(make_materia(body, pi, pf, "PMAL"))
 
+    # --- Buscar menções à PMAL em outras seções ---
+    materias_mencoes = []
+    proto_positions = [m2.end() for m2 in re.finditer(r"Protocolo\s+\d+", full_text)]
+    cursor = 0
     for proto_end in proto_positions:
         body = full_text[cursor:proto_end].strip()
         cursor = proto_end
         if len(body) < 30:
             continue
-
         pagina_ini = pos_to_page(proto_end - len(body))
         pagina_fim = pos_to_page(proto_end - 1)
 
-        # Verificar se está na faixa de páginas da seção PMAL
-        if pmal_range and pagina_ini in pmal_range:
-            materias_pmal.append(make_materia(body, pagina_ini, pagina_fim, "PMAL"))
+        # Pular se está no índice (pags 1-6) ou na seção PMAL
+        if pagina_ini <= 6 or (pmal_range and pagina_ini in pmal_range):
+            continue
 
-        # Se NÃO está na seção PMAL e NÃO está no índice (pags 1-5),
-        # verifica se menciona a PMAL
-        elif pagina_ini > 5 and pagina_ini not in pmal_range:
-            if PMAL_TERMS_RE.search(body) and not BM_EXCLUDE_RE.search(body):
-                # Patentes por extenso só contam se o bloco também tiver "PM AL" ou "PM" no contexto
-                rank_only = re.search(
-                    r"PRIMEIRO SARGENTO|SEGUNDO SARGENTO|TERCEIRO SARGENTO"
-                    r"|SUB.?TENENTE|CAPIT.O|MAJOR|TENENTE CORONEL|CORONEL"
-                    r"|DI.RIAS.*MILITAR", body, re.I)
-                pm_context = re.search(r"\bPM\s*AL\b|\bPMAL\b|\bPM/AL\b|\d+\s*PM\s*AL", body, re.I)
-                # Se achou só patente por extenso, exige que também tenha "PM AL" no bloco
-                if rank_only and not pm_context:
-                    has_pm_abbrev = re.search(
-                        r"\bPM\b(?!\s*(?:AL|/|-))", body)
-                    if not has_pm_abbrev:
-                        pass  # Ignora: patente genérica sem vínculo com PM
-                    else:
-                        materias_mencoes.append(
-                            make_materia(body, pagina_ini, pagina_fim, "Menção"))
-                else:
-                    materias_mencoes.append(
-                        make_materia(body, pagina_ini, pagina_fim, "Menção"))
+        if PMAL_TERMS_RE.search(body) and not BM_EXCLUDE_RE.search(body):
+            # Patentes por extenso: exige que o bloco tenha "PM AL" ou "PMAL"
+            rank_only = re.search(
+                r"PRIMEIRO SARGENTO|SEGUNDO SARGENTO|TERCEIRO SARGENTO"
+                r"|SUB.?TENENTE|CAPIT.O|MAJOR|TENENTE CORONEL|CORONEL",
+                body, re.I)
+            has_diaria_mil = re.search(r"DI.RIAS.*MILITAR", body, re.I)
+            pm_context = re.search(
+                r"\bPM\s*AL\b|\bPMAL\b|\bPM/AL\b|\d+\s*PM\s*AL"
+                r"|\bPM\b.*\bAL\b", body, re.I)
+            has_pm_abbrev = re.search(
+                r"\bCel\.?\s*PM\b|\bMaj\.?\s*PM\b|\bCap\.?\s*PM\b"
+                r"|\bTen\.?\s*PM\b|\bSgt\.?\s*PM\b|\bCb\.?\s*PM\b"
+                r"|\bSd\.?\s*PM\b|\bSubten\.?\s*PM\b", body, re.I)
+
+            # Se achou diária militar ou contexto PM, inclui
+            if has_diaria_mil or pm_context or has_pm_abbrev:
+                materias_mencoes.append(
+                    make_materia(body, pagina_ini, pagina_fim, "Menção"))
+            # Se só achou PMAL/PM-AL explícito, inclui
+            elif re.search(r"\bPMAL\b|\bPM/AL\b|\bPM-AL\b", body, re.I):
+                materias_mencoes.append(
+                    make_materia(body, pagina_ini, pagina_fim, "Menção"))
 
     print(f"  Matérias na seção PMAL: {len(materias_pmal)}")
     print(f"  Menções à PMAL em outras seções: {len(materias_mencoes)}")
@@ -450,6 +486,7 @@ def gerar_pdf(ed, dest):
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.lib import colors
+    from reportlab.lib.enums import TA_JUSTIFY
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 
     def p(texto):
@@ -476,7 +513,7 @@ def gerar_pdf(ed, dest):
     st_corpo = ParagraphStyle("corpo", parent=styles["Normal"],
                               fontName="Helvetica", fontSize=12,
                               leading=16, spaceAfter=8,
-                              alignment=4)  # 4 = TA_JUSTIFY
+                              alignment=TA_JUSTIFY)  # 4 = TA_JUSTIFY
 
     doc = SimpleDocTemplate(str(dest), pagesize=A4,
                             leftMargin=1.8*cm, rightMargin=1.8*cm,
