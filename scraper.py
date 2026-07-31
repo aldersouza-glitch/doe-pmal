@@ -2,10 +2,8 @@
 """
 Robô DOE-AL → PMAL
 Baixa novas edições do Diário Oficial do Estado de Alagoas,
-extrai a seção da Polícia Militar de Alagoas (PMAL) e as menções
-à PMAL em outras seções, e gera um site estático em /docs.
-
-Feito para rodar via GitHub Actions (dias úteis) ou manualmente.
+extrai a seção da Polícia Militar de Alagoas (PMAL) com
+indicação da página inicial e final de cada matéria.
 """
 
 import json
@@ -28,13 +26,11 @@ DATA_FILE = DOCS / "data" / "edicoes.json"
 API_PDF = "https://diario.imprensaoficial.al.gov.br/apinova/api/editions/downloadPdf/{}"
 PORTAL = "https://diario.imprensaoficial.al.gov.br/"
 
-# Quantos IDs à frente do último conhecido o robô tenta por execução
 PROBE_RANGE = 30
-MIN_PDF_BYTES = 40_000  # respostas menores que isso não são uma edição real
+MIN_PDF_BYTES = 40_000
 
 TZ_MACEIO = timezone(timedelta(hours=-3))
 
-# Cabeçalhos repetidos em toda página, que poluem o texto extraído
 HEADER_PATTERNS = [
     re.compile(r"^Edi[cç][aã]o Eletr[oô]nica Certi\w*cada Digitalmente.*$", re.I),
     re.compile(r"^conforme LEI N[°º]?\s*7\.?397/2012.*$", re.I),
@@ -44,7 +40,6 @@ HEADER_PATTERNS = [
     re.compile(r"^\d{1,2} de \w+ de \d{4}\s*\d*$", re.I),
 ]
 
-# Seções que marcam o FIM da seção da PMAL no diário
 END_SECTION_MARKERS = [
     "ADMINISTRAÇÃO INDIRETA",
     "Eventos Funcionais",
@@ -52,18 +47,13 @@ END_SECTION_MARKERS = [
     "PARTICULARES",
 ]
 
+# Cabeçalho de seção: precisa estar praticamente isolado numa linha
+# (sem outros textos grudados antes/depois na mesma linha), pra evitar
+# capturar o índice, referências dentro de despachos, etc.
 PMAL_HEADING_RE = re.compile(
-    r"Pol[ií]cia Militar do Estado de Alagoas\s*\(PMAL\)", re.I
+    r"^[\s.]*Pol[ií]cia Militar do Estado de Alagoas\s*\(PMAL\)[\s.]*$",
+    re.I | re.M
 )
-
-# Termos que indicam menção à PMAL fora da seção própria
-MENTION_TERMS = [
-    r"\bPMAL\b", r"\bPM/AL\b", r"Pol[ií]cia Militar",
-    r"\bCel\.?\s?PM\b", r"\bTen\.?\s?Cel\.?\s?PM\b", r"\bMaj\.?\s?PM\b",
-    r"\bCap\.?\s?PM\b", r"\bTen\.?\s?PM\b", r"\bAsp\.?\s?PM\b",
-    r"\bSgt\.?\s?PM\b", r"\bCb\.?\s?PM\b", r"\bSd\.?\s?PM\b",
-]
-MENTION_RE = re.compile("|".join(MENTION_TERMS), re.I)
 
 MESES = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4,
@@ -71,34 +61,29 @@ MESES = {
     "outubro": 10, "novembro": 11, "dezembro": 12,
 }
 
+FIXES = {
+    "Oicial": "Oficial", "oicial": "oficial",
+    "Certiicad": "Certificad", "certiicad": "certificad",
+    "especíic": "específic", "Especíic": "Específic",
+    "veriicaç": "verificaç", "Veriicaç": "Verificaç",
+    "iscal": "fiscal", "Ediicaç": "Edificaç",
+    "proission": "profission", "Proission": "Profission",
+    "justiicativ": "justificativ", "ratiicad": "ratificad",
+    "Ratiicad": "Ratificad", "retiicaç": "retificaç",
+    "inanceir": "financeir",
+    "eiciência": "eficiência", "eicácia": "eficácia",
+    "gratiicaç": "gratificaç", "Gratiicaç": "Gratificaç",
+    "notiicaç": "notificaç", "Notiicaç": "Notificaç",
+    "classiicaç": "classificaç", "Classiicaç": "Classificaç",
+    "qualiicaç": "qualificaç", "Qualiicaç": "Qualificaç",
+    "identiicaç": "identificaç", "Identiicaç": "Identificaç",
+    "ica ": "fica ", " im ": " fim ",
+}
 
-# ----------------------------------------------------------------------
-# Extração de texto (o DOE é diagramado em DUAS COLUNAS)
-# ----------------------------------------------------------------------
 
 def normalize(text: str) -> str:
-    """Normaliza ligaduras tipográficas (ﬁ → fi) e espaços."""
     text = unicodedata.normalize("NFKC", text)
-    # Corrige ligaduras perdidas na extração ("Oicial" → "Oficial" etc.)
-    fixes = {
-        "Oicial": "Oficial", "oicial": "oficial",
-        "Certiicad": "Certificad", "certiicad": "certificad",
-        "especíic": "específic", "Especíic": "Específic",
-        "veriicaç": "verificaç", "Veriicaç": "Verificaç",
-        "iscal": "fiscal", "Ediicaç": "Edificaç",
-        "proission": "profission", "Proission": "Profission",
-        "justiicativ": "justificativ", "ratiicad": "ratificad",
-        "Ratiicad": "Ratificad", "retiicaç": "retificaç",
-        "inanceir": "financeir", "Finanças": "Finanças",
-        "eiciência": "eficiência", "eicácia": "eficácia",
-        "gratiicaç": "gratificaç", "Gratiicaç": "Gratificaç",
-        "notiicaç": "notificaç", "Notiicaç": "Notificaç",
-        "classiicaç": "classificaç", "Classiicaç": "Classificaç",
-        "qualiicaç": "qualificaç", "Qualiicaç": "Qualificaç",
-        "identiicaç": "identificaç", "Identiicaç": "Identificaç",
-        "ica ": "fica ", " im ": " fim ",
-    }
-    for wrong, right in fixes.items():
+    for wrong, right in FIXES.items():
         text = text.replace(wrong, right)
     return text
 
@@ -114,7 +99,6 @@ def strip_headers(text: str) -> str:
 
 
 def first_page_text(pdf_path: Path) -> str:
-    """Texto bruto da primeira página (capa), usado só para data e número."""
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[0]
         w, h = page.width, page.height
@@ -127,11 +111,10 @@ def first_page_text(pdf_path: Path) -> str:
             return normalize(page.extract_text() or "")
 
 
-def extract_pdf_text(pdf_path: Path) -> str:
-    """Extrai o texto respeitando as duas colunas de cada página."""
-    parts = []
+def extract_pages(pdf_path: Path) -> list:
+    pages = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages, 1):
             w, h = page.width, page.height
             mid = w / 2
             try:
@@ -140,16 +123,11 @@ def extract_pdf_text(pdf_path: Path) -> str:
                 page_text = left + "\n" + right
             except Exception:
                 page_text = page.extract_text() or ""
-            parts.append(strip_headers(page_text))
-    return normalize("\n".join(parts))
+            pages.append((i, normalize(strip_headers(page_text))))
+    return pages
 
-
-# ----------------------------------------------------------------------
-# Interpretação do conteúdo
-# ----------------------------------------------------------------------
 
 def parse_metadata(text: str) -> dict:
-    """Data e número da edição, lidos da primeira página."""
     meta = {"numero": None, "data": None, "data_texto": None}
     m = re.search(r"Ano\s+\d+\s*-\s*N[uú]mero\s+(\d+)", text)
     if m:
@@ -164,98 +142,66 @@ def parse_metadata(text: str) -> dict:
     return meta
 
 
-def find_pmal_section(text: str) -> str:
-    """Recorta o trecho entre o título da seção PMAL e a próxima seção."""
-    matches = list(PMAL_HEADING_RE.finditer(text))
+def extract_pmal_materias(pages: list) -> list:
+    full_text = ""
+    page_offsets = []
+    for num, txt in pages:
+        page_offsets.append((num, len(full_text)))
+        full_text += txt + "\n"
+
+    matches = list(PMAL_HEADING_RE.finditer(full_text))
     if not matches:
-        return ""
-    # A primeira ocorrência costuma ser o índice; a última é o título real.
-    start = matches[-1].end()
-    end = len(text)
-    for marker in END_SECTION_MARKERS:
-        pattern = re.compile(r"^\s*" + re.escape(marker) + r"\s*$", re.M)
-        m = pattern.search(text, start)
-        if m and m.start() < end:
-            end = m.start()
-    return text[start:end].strip()
-
-
-def split_materias(section_text: str) -> list:
-    """Divide a seção nas matérias, usando 'Protocolo NNN' como delimitador."""
-    if not section_text:
         return []
-    materias = []
-    chunks = re.split(r"(Protocolo\s+\d+)", section_text)
-    buffer = ""
-    for chunk in chunks:
-        if re.match(r"Protocolo\s+\d+", chunk):
-            body = (buffer + chunk).strip()
-            if len(body) > 30:
-                materias.append(make_materia(body))
-            buffer = ""
-        else:
-            buffer += chunk
-    leftover = buffer.strip()
-    if len(leftover) > 60:
-        materias.append(make_materia(leftover))
-    return materias
-
-
-def make_materia(body: str) -> dict:
-    lines = [l.strip() for l in body.split("\n") if l.strip()]
-    title = lines[0] if lines else "Matéria"
-    # Títulos muito longos ganham reticências
-    if len(title) > 120:
-        title = title[:117] + "..."
-    proto = None
-    m = re.search(r"Protocolo\s+(\d+)", body)
-    if m:
-        proto = m.group(1)
-    return {"titulo": title, "protocolo": proto, "texto": body}
-
-
-def find_mentions(text: str, section_start: int, section_end: int) -> list:
-    """Procura menções à PMAL fora da seção própria, com contexto."""
-    mentions = []
-    seen = set()
-    for m in MENTION_RE.finditer(text):
-        if section_start <= m.start() < section_end:
-            continue  # já está na seção da PMAL
-        ctx_start = max(0, text.rfind("\n", 0, m.start() - 400))
-        ctx_end = text.find("Protocolo", m.end())
-        if ctx_end == -1 or ctx_end - m.start() > 1200:
-            ctx_end = min(len(text), m.end() + 600)
-        else:
-            ctx_end = min(len(text), ctx_end + 20)
-        snippet = text[ctx_start:ctx_end].strip()
-        snippet = re.sub(r"\s+", " ", snippet)
-        key = snippet[:120]
-        if key in seen:
-            continue
-        seen.add(key)
-        mentions.append({"termo": m.group(0), "contexto": snippet})
-        if len(mentions) >= 40:
-            break
-    return mentions
-
-
-def section_bounds(text: str):
-    matches = list(PMAL_HEADING_RE.finditer(text))
-    if not matches:
-        return (len(text), len(text))
-    start = matches[-1].start()
-    end = len(text)
+    # Se houver mais de uma ocorrência (raro, mas possível),
+    # usa a que estiver mais próxima do fim do diário.
+    start = matches[-1].end()
+    end = len(full_text)
     for marker in END_SECTION_MARKERS:
         pattern = re.compile(r"^\s*" + re.escape(marker) + r"\s*$", re.M)
-        m = pattern.search(text, start)
+        m = pattern.search(full_text, start)
         if m and m.start() < end:
             end = m.start()
-    return (start, end)
 
+    section = full_text[start:end]
 
-# ----------------------------------------------------------------------
-# Download e descoberta de edições
-# ----------------------------------------------------------------------
+    def pos_to_page(abs_pos: int) -> int:
+        pagina = page_offsets[0][0]
+        for p, off in page_offsets:
+            if abs_pos >= off:
+                pagina = p
+            else:
+                break
+        return pagina
+
+    materias_ends = []
+    for m in re.finditer(r"Protocolo\s+\d+", section):
+        materias_ends.append(start + m.end())
+
+    materias_out = []
+    cursor = start
+    for proto_end_abs in materias_ends:
+        body = full_text[cursor:proto_end_abs].strip()
+        if len(body) > 30:
+            pagina_ini = pos_to_page(cursor)
+            pagina_fim = pos_to_page(proto_end_abs - 1)
+            lines = [l.strip() for l in body.split("\n") if l.strip()]
+            titulo = lines[0] if lines else "Matéria"
+            if len(titulo) > 120:
+                titulo = titulo[:117] + "..."
+            proto = None
+            pm = re.search(r"Protocolo\s+(\d+)", body)
+            if pm:
+                proto = pm.group(1)
+            materias_out.append({
+                "titulo": titulo,
+                "protocolo": proto,
+                "texto": body,
+                "pagina_ini": pagina_ini,
+                "pagina_fim": pagina_fim,
+            })
+        cursor = proto_end_abs
+    return materias_out
+
 
 def try_download(edition_id: int, dest: Path) -> bool:
     url = API_PDF.format(edition_id)
@@ -278,15 +224,11 @@ def try_download(edition_id: int, dest: Path) -> bool:
     return True
 
 
-# ----------------------------------------------------------------------
-# Geração do site (docs/)
-# ----------------------------------------------------------------------
-
 CSS = """
 :root{
   --tinta:#10151c; --papel:#f7f5f0; --carta:#ffffff;
   --farda:#1e3a5f; --farda-escuro:#14283f; --dourado:#b8860b;
-  --cinza:#5c6672; --linha:#e3ded4; --ok:#1e7145;
+  --cinza:#5c6672; --linha:#e3ded4;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--papel);color:var(--tinta);
@@ -322,15 +264,17 @@ h3.secao{font-family:'Trebuchet MS',Verdana,sans-serif;color:var(--farda);
   border-bottom:2px solid var(--dourado);padding-bottom:6px;margin:34px 0 16px}
 .aviso{background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;
   padding:12px 16px;font-size:.88rem;color:#6b5900;margin:0 0 18px}
+.pag{background:var(--dourado);color:#fff;border-radius:4px;
+  padding:1px 8px;font-size:.75rem;
+  font-family:'Trebuchet MS',Verdana,sans-serif;margin-left:6px}
 .voltar{font-family:'Trebuchet MS',Verdana,sans-serif;font-size:.85rem}
 .voltar a{color:var(--farda)}
 footer{max-width:900px;margin:0 auto;padding:20px;color:var(--cinza);
   font-size:.8rem;border-top:1px solid var(--linha)}
-mark{background:#ffe9a8}
 """
 
 
-def html_page(title: str, body: str, subtitle: str = "") -> str:
+def html_page(title, body, subtitle=""):
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -342,7 +286,7 @@ def html_page(title: str, body: str, subtitle: str = "") -> str:
 <body>
 <header class="site"><div class="wrap">
 <h1>DOE-AL &middot; Clipping PMAL</h1>
-<p>{subtitle or "Matérias da Polícia Militar de Alagoas no Diário Oficial do Estado — compilação automática"}</p>
+<p>{subtitle or "Matérias da Polícia Militar de Alagoas no Diário Oficial do Estado"}</p>
 </div></header>
 <main>
 {body}
@@ -353,41 +297,38 @@ certificada digitalmente publicada pela Imprensa Oficial Graciliano Ramos em
 </body></html>"""
 
 
-def esc(s: str) -> str:
+def esc(s):
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def build_edition_page(ed: dict) -> str:
+def pag_label(mat):
+    if mat["pagina_ini"] == mat["pagina_fim"]:
+        return f'pág. {mat["pagina_ini"]}'
+    return f'págs. {mat["pagina_ini"]}–{mat["pagina_fim"]}'
+
+
+def build_edition_page(ed):
     body = [f'<p class="voltar"><a href="../index.html">&larr; Todas as edições</a> &nbsp;&middot;&nbsp; '
             f'<a href="{ed["numero"]}.pdf">Baixar compilado PMAL (PDF)</a> &nbsp;&middot;&nbsp; '
             f'<a href="{API_PDF.format(ed["id"])}" target="_blank">Edição completa (PDF oficial)</a></p>']
     body.append(f'<h2>Edição nº {ed["numero"]} — {ed["data_texto"]}'
                 f'<span class="badge">{len(ed["materias"])} matéria(s) PMAL</span></h2>')
 
-    if not ed["materias"] and not ed["mencoes"]:
+    if not ed["materias"]:
         body.append('<div class="aviso">Nenhuma matéria da PMAL foi localizada nesta edição.</div>')
-
-    if ed["materias"]:
+    else:
         body.append('<input class="busca" id="busca" type="search" '
-                    'placeholder="Filtrar matérias por nome, posto, matrícula...">')
+                    'placeholder="Filtrar por nome, posto, matrícula...">')
         body.append('<h3 class="secao">Seção Polícia Militar do Estado de Alagoas (PMAL)</h3>')
         for mat in ed["materias"]:
             proto = f' &middot; Protocolo {mat["protocolo"]}' if mat["protocolo"] else ""
             body.append(
                 f'<details class="mat"><summary>{esc(mat["titulo"])}'
+                f'<span class="pag">{pag_label(mat)}</span>'
                 f'<span class="meta">{proto}</span></summary>'
                 f'<div class="corpo">{esc(mat["texto"])}</div></details>'
             )
-
-    if ed["mencoes"]:
-        body.append('<h3 class="secao">Menções à PMAL em outras seções</h3>')
-        for men in ed["mencoes"]:
-            body.append(
-                f'<details class="mat"><summary>Menção: {esc(men["termo"])}</summary>'
-                f'<div class="corpo">{esc(men["contexto"])}</div></details>'
-            )
-
-    body.append("""<script>
+        body.append("""<script>
 const campo=document.getElementById('busca');
 if(campo){campo.addEventListener('input',()=>{
   const q=campo.value.toLowerCase();
@@ -400,32 +341,24 @@ if(campo){campo.addEventListener('input',()=>{
     return html_page(f'DOE-AL {ed["numero"]} — PMAL', "\n".join(body), subtitle)
 
 
-def build_index(editions: list) -> str:
+def build_index(editions):
     body = []
     if not editions:
-        body.append('<div class="aviso">Nenhuma edição processada ainda. '
-                    'O robô roda automaticamente nos dias úteis.</div>')
+        body.append('<div class="aviso">Nenhuma edição processada ainda.</div>')
     else:
         body.append('<h3 class="secao">Edições compiladas</h3>')
         for ed in sorted(editions, key=lambda e: (e.get("data") or "", e["numero"]), reverse=True):
             n_mat = ed.get("qtd_materias", 0)
-            n_men = ed.get("qtd_mencoes", 0)
             body.append(
                 f'<a class="card-link" href="edicoes/{ed["numero"]}.html"><div class="card">'
                 f'<h2>Edição nº {ed["numero"]}</h2>'
-                f'<div class="meta">{ed["data_texto"]} &middot; {n_mat} matéria(s) na seção PMAL'
-                f' &middot; {n_men} menção(ões) em outras seções</div>'
+                f'<div class="meta">{ed["data_texto"]} &middot; {n_mat} matéria(s) na seção PMAL</div>'
                 f'</div></a>'
             )
     return html_page("DOE-AL — Clipping PMAL", "\n".join(body))
 
 
-# ----------------------------------------------------------------------
-# Geração do PDF compilado
-# ----------------------------------------------------------------------
-
-def gerar_pdf(ed: dict, dest: Path):
-    """Gera um PDF só com o conteúdo da PMAL, pronto para envio por e-mail."""
+def gerar_pdf(ed, dest):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
@@ -433,7 +366,7 @@ def gerar_pdf(ed: dict, dest: Path):
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                                     HRFlowable)
 
-    def p(texto: str) -> str:
+    def p(texto):
         texto = (texto.replace("&", "&amp;")
                        .replace("<", "&lt;").replace(">", "&gt;"))
         return texto.replace("\n", "<br/>")
@@ -454,6 +387,10 @@ def gerar_pdf(ed: dict, dest: Path):
                                    fontName="Helvetica-Bold", fontSize=9.5,
                                    textColor=colors.HexColor("#14283f"),
                                    spaceBefore=10, spaceAfter=3)
+    st_pag = ParagraphStyle("pag", parent=styles["Normal"],
+                            fontName="Helvetica-Oblique", fontSize=8,
+                            textColor=colors.HexColor("#b8860b"),
+                            spaceAfter=4)
     st_corpo = ParagraphStyle("corpo", parent=styles["Normal"],
                               fontName="Helvetica", fontSize=8.5,
                               leading=11.5, spaceAfter=6)
@@ -465,8 +402,7 @@ def gerar_pdf(ed: dict, dest: Path):
     story = [
         Paragraph("DOE-AL · Clipping PMAL", st_titulo),
         Paragraph(f"Edição nº {ed['numero']} — {ed['data_texto']} · "
-                  f"{len(ed['materias'])} matéria(s) na seção PMAL · "
-                  f"{len(ed['mencoes'])} menção(ões) em outras seções", st_sub),
+                  f"{len(ed['materias'])} matéria(s) na seção PMAL", st_sub),
         HRFlowable(width="100%", thickness=1.2,
                    color=colors.HexColor("#b8860b")),
     ]
@@ -478,18 +414,13 @@ def gerar_pdf(ed: dict, dest: Path):
             proto = f" · Protocolo {mat['protocolo']}" if mat["protocolo"] else ""
             story.append(Paragraph(f"{i}. {p(mat['titulo'])}{proto}",
                                    st_mat_titulo))
+            story.append(Paragraph(f"({pag_label(mat)} do diário oficial)",
+                                   st_pag))
             story.append(Paragraph(p(mat["texto"]), st_corpo))
     else:
         story.append(Paragraph(
             "Nenhuma matéria localizada na seção da PMAL nesta edição.",
             st_corpo))
-
-    if ed["mencoes"]:
-        story.append(Paragraph("MENÇÕES À PMAL EM OUTRAS SEÇÕES", st_secao))
-        for i, men in enumerate(ed["mencoes"], 1):
-            story.append(Paragraph(f"{i}. Termo encontrado: {p(men['termo'])}",
-                                   st_mat_titulo))
-            story.append(Paragraph(p(men["contexto"]), st_corpo))
 
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.6,
@@ -501,29 +432,22 @@ def gerar_pdf(ed: dict, dest: Path):
     doc.build(story)
 
 
-# ----------------------------------------------------------------------
-# Fluxo principal
-# ----------------------------------------------------------------------
-
-def load_state() -> dict:
+def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     return {"last_id": 51739, "processed": []}
 
 
-def load_editions() -> list:
+def load_editions():
     if DATA_FILE.exists():
         return json.loads(DATA_FILE.read_text(encoding="utf-8"))
     return []
 
 
-def process_pdf(edition_id: int, pdf_path: Path) -> dict:
-    text = extract_pdf_text(pdf_path)
+def process_pdf(edition_id, pdf_path):
+    pages = extract_pages(pdf_path)
     meta = parse_metadata(first_page_text(pdf_path))
-    start, end = section_bounds(text)
-    section = find_pmal_section(text)
-    materias = split_materias(section)
-    mencoes = find_mentions(text, start, end)
+    materias = extract_pmal_materias(pages)
     hoje = datetime.now(TZ_MACEIO)
     return {
         "id": edition_id,
@@ -531,7 +455,6 @@ def process_pdf(edition_id: int, pdf_path: Path) -> dict:
         "data": meta["data"],
         "data_texto": meta["data_texto"] or "data não identificada",
         "materias": materias,
-        "mencoes": mencoes,
         "processado_em": hoje.isoformat(),
     }
 
@@ -543,27 +466,6 @@ def main():
 
     EDICOES_DIR.mkdir(parents=True, exist_ok=True)
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    # Modo de teste local: python scraper.py caminho/edicao.pdf ID
-    if len(sys.argv) >= 2 and sys.argv[1].endswith(".pdf"):
-        pdf = Path(sys.argv[1])
-        eid = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-        ed = process_pdf(eid, pdf)
-        print(json.dumps({k: (len(v) if isinstance(v, list) else v)
-                          for k, v in ed.items()}, indent=2, ensure_ascii=False))
-        (EDICOES_DIR / f'{ed["numero"]}.html').write_text(
-            build_edition_page(ed), encoding="utf-8")
-        gerar_pdf(ed, EDICOES_DIR / f'{ed["numero"]}.pdf')
-        summary = {k: ed[k] for k in ("id", "numero", "data", "data_texto")}
-        summary["qtd_materias"] = len(ed["materias"])
-        summary["qtd_mencoes"] = len(ed["mencoes"])
-        editions_index = [e for e in editions_index if e["numero"] != ed["numero"]]
-        editions_index.append(summary)
-        DATA_FILE.write_text(json.dumps(editions_index, ensure_ascii=False, indent=1),
-                             encoding="utf-8")
-        (DOCS / "index.html").write_text(build_index(editions_index), encoding="utf-8")
-        print("Página gerada em docs/edicoes/")
-        return
 
     last_id = state["last_id"]
     print(f"Último ID conhecido: {last_id}. Sondando até {last_id + PROBE_RANGE}...")
@@ -581,23 +483,20 @@ def main():
             tmp.unlink(missing_ok=True)
 
         print(f"  → Edição nº {ed['numero']} ({ed['data_texto']}): "
-              f"{len(ed['materias'])} matérias PMAL, {len(ed['mencoes'])} menções")
+              f"{len(ed['materias'])} matérias PMAL")
 
         (EDICOES_DIR / f'{ed["numero"]}.html').write_text(
             build_edition_page(ed), encoding="utf-8")
         gerar_pdf(ed, EDICOES_DIR / f'{ed["numero"]}.pdf')
 
-        # Sinaliza ao workflow que há novidade para enviar por e-mail
         with open(BASE / "novas.txt", "a", encoding="utf-8") as f:
             f.write(f"docs/edicoes/{ed['numero']}.pdf\n")
         with open(BASE / "resumo.txt", "a", encoding="utf-8") as f:
             f.write(f"Edição nº {ed['numero']} — {ed['data_texto']}: "
-                    f"{len(ed['materias'])} matéria(s) na seção PMAL, "
-                    f"{len(ed['mencoes'])} menção(ões) em outras seções.\n")
+                    f"{len(ed['materias'])} matéria(s) na seção PMAL.\n")
 
         summary = {k: ed[k] for k in ("id", "numero", "data", "data_texto")}
         summary["qtd_materias"] = len(ed["materias"])
-        summary["qtd_mencoes"] = len(ed["mencoes"])
         editions_index = [e for e in editions_index if e["numero"] != ed["numero"]]
         editions_index.append(summary)
 
