@@ -61,6 +61,11 @@ INDEX_PMAL_RE = re.compile(
     r"Pol[ií]cia\s+Militar.*?\(PMAL\).*?(\d+)\s*$", re.I | re.M
 )
 
+# Regex pra encontrar "Atos e Despachos do Governador" no índice
+INDEX_GOV_RE = re.compile(
+    r"Atos\s+e\s+Despachos\s+do\s+Governador.*?(\d+)\s*$", re.I | re.M
+)
+
 # Seções que vêm DEPOIS da PMAL no índice
 NEXT_SECTIONS_RE = re.compile(
     r"(?:ADMINISTRA[CÇ][AÃ]O\s+INDIRETA|Eventos\s+Funcionais|"
@@ -94,6 +99,13 @@ PMAL_TERMS_RE = re.compile(
 BM_EXCLUDE_RE = re.compile(
     r"\bCBM\b|\bCBMAL\b|\bCBM/AL\b|Bombeiro|\bBM\b"
     r"|Corpo\s+de\s+Bombeiros",
+    re.I
+)
+
+# Termos que indicam Polícia Civil (pra EXCLUIR da seção PMAL)
+PC_EXCLUDE_RE = re.compile(
+    r"POL[IÍ]CIA\s+CIVIL|\bPCAL\b|DELEGADO\s+GERAL"
+    r"|DELEGADO\s+DE\s+POL[IÍ]CIA|ESCOLA\s+SUPERIOR\s+DE\s+POL[IÍ]CIA\s+CIVIL",
     re.I
 )
 
@@ -223,6 +235,11 @@ def extract_all_pmal(pdf_path):
         else:
             print("  AVISO: Seção PMAL não encontrada no índice.")
 
+        # Também localizar "Atos e Despachos do Governador" no índice
+        gov_match = INDEX_GOV_RE.search(index_text)
+        if gov_match:
+            print(f"  Atos e Despachos do Governador: a partir da página {gov_match.group(1)}")
+
         # --- Extrair texto de TODAS as páginas ---
         all_pages = []
         for i, page in enumerate(pdf.pages, 1):
@@ -281,7 +298,13 @@ def extract_all_pmal(pdf_path):
             else:
                 pi = pag_inicio
                 pf = pag_inicio
-            materias_pmal.append(make_materia(body, pi, pf, "PMAL"))
+            # Se tem Polícia Civil, só inclui se TAMBÉM tiver termo da PM
+            if PC_EXCLUDE_RE.search(body):
+                if PMAL_TERMS_RE.search(body):
+                    materias_pmal.append(make_materia(body, pi, pf, "PMAL"))
+                # senão: é matéria só da PC, ignora
+            else:
+                materias_pmal.append(make_materia(body, pi, pf, "PMAL"))
 
     # --- Buscar menções à PMAL em outras seções ---
     materias_mencoes = []
