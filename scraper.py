@@ -127,22 +127,43 @@ def extract_page_text(page):
 
 
 def first_page_text(pdf_path):
+    """Lê apenas o CABEÇALHO da primeira página (faixa superior),
+    onde ficam a data, número da edição e nome do jornal.
+    Ignora o conteúdo das colunas pra não capturar datas erradas."""
     with pdfplumber.open(pdf_path) as pdf:
-        return extract_page_text(pdf.pages[0])
+        page = pdf.pages[0]
+        w, h = page.width, page.height
+        # O cabeçalho ocupa mais ou menos os 10% superiores da página
+        header_height = h * 0.12
+        try:
+            header = page.crop((0, 0, w, header_height))
+            text = header.extract_text() or ""
+            return normalize(text)
+        except Exception:
+            # Fallback: pega a página inteira
+            return normalize(page.extract_text() or "")
 
 
 def parse_metadata(text):
+    """Extrai número e data da edição do cabeçalho do diário.
+    Prioriza datas do ano atual ou próximo (2025-2027) pra evitar
+    pegar datas de documentos antigos citados no conteúdo."""
     meta = {"numero": None, "data": None, "data_texto": None}
     m = re.search(r"Ano\s+\d+\s*-\s*N[uú]mero\s+(\d+)", text)
     if m:
         meta["numero"] = m.group(1)
-    m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", text)
-    if m:
+    # Procura TODAS as datas no texto e pega a mais recente (>= 2025)
+    datas = re.finditer(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", text)
+    for m in datas:
         dia, mes_nome, ano = m.groups()
+        ano_int = int(ano)
+        if ano_int < 2024:
+            continue  # ignora datas antigas de documentos citados
         mes = MESES.get(mes_nome.lower())
         if mes:
             meta["data"] = f"{ano}-{mes:02d}-{int(dia):02d}"
             meta["data_texto"] = f"{int(dia)} de {mes_nome.lower()} de {ano}"
+            break  # pega a primeira data recente
     return meta
 
 
