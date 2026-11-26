@@ -1526,5 +1526,21 @@
   "data_texto": "data não identificada",
   "qtd_secao": 1,
   "qtd_mencoes": 2
+ },
+ {
+  "id": 52031,
+  "numero": "52031",
+  "data": null,
+  "data_texto": "data não identificada",
+  "qtd_secao": 1,
+  "qtd_mencoes": 3
+ },
+ {
+  "id": 52032,
+  "numero": "52032",
+  "data": null,
+  "data_texto": "data não identificada",
+  "qtd_secao": 0,
+  "qtd_mencoes": 0
  }
 ]
